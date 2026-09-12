@@ -116,13 +116,16 @@ exit $EXIT
 Run `doctor` to verify that everything is configured correctly:
 
 ```bash
-hellocron doctor          # checks config, API URL, key, connectivity
-hellocron doctor --ping   # additionally sends a real test ping (state: skip)
+hellocron doctor                    # checks config, API URL, key, connectivity, version
+hellocron doctor --ping             # additionally sends a real test ping (state: skip)
+hellocron doctor --no-update-check  # skips the version check (host without outbound access)
 ```
 
 It checks: HTTP tool availability (curl/wget), config file and its permissions,
-API URL and key, temp directory, API reachability (`/health`) and crontab access.
-Exit code is `0` when everything is OK, `1` when problems are found.
+API URL and key, temp directory, API reachability (`/health`), crontab access, and
+whether the installed version is the current one. Exit code is `0` when everything is
+OK, `1` when problems are found. An available update is reported as a warning, not a
+problem, and a version check that could not run leaves the exit code alone.
 
 ## Using in Docker
 
@@ -132,13 +135,6 @@ Mount the script and config into your container:
 volumes:
   - ./hellocron.sh:/usr/local/bin/hellocron:ro
   - ./.hellocron.conf:/root/.hellocron.conf:ro
-```
-
-## Checking your setup
-
-```bash
-hellocron doctor          # config, key, connectivity, crontab access
-hellocron doctor --ping   # additionally sends a real test ping (state: skip)
 ```
 
 ## Sign up

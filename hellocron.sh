@@ -36,12 +36,15 @@ DEFAULT_PING_TIMEOUT=5
 
 MAX_ERROR_OUTPUT_SIZE=10240
 
-VERSION="1.5"
+VERSION="1.5.2"
 VERSION_DATE="2026-09-12"
 VERSION_BUILD="${VERSION_DATE//-/}"
 VERSION_BUILD="${VERSION_BUILD:2}"
 VERSION_TAG="v${VERSION}-${VERSION_BUILD}"
 APP_NAME="HelloCronClient ${VERSION_TAG}"
+# Where the client downloads itself from. Overridable so the test suite can point
+# the version check at a local server instead of the real one.
+DOWNLOAD_BASE_URL="${HELLOCRON_DOWNLOAD_URL:-https://hellocron.com}"
 
 header() {
     # Brand green from the logo (#4ADE80); plain green where truecolor is unsupported
@@ -1093,7 +1096,7 @@ cmd_help() {
     echo "  configure [--api-key <key>] [--project <name>]     Save your ingest key (asks for it when not given)"
     echo "  configure --management-key                         Save the management key used by apply and export"
     echo "  update [--check]                                   Update the script to the latest version"
-    echo "  doctor [--ping]                                    Check your setup (config, connectivity); --ping sends a test ping"
+    echo "  doctor [--ping] [--no-update-check]                Check your setup (config, connectivity, version); --ping sends a test ping"
     echo "  help                                               Show this help"
     echo "  version                                            Show version information"
     echo ""
@@ -1143,17 +1146,30 @@ doctor_http_code() {
     fi
 }
 
+# Fetches a short body for the checks below. Silent and time-boxed: a host without
+# outbound access has to reach the end of doctor, not hang in the middle of it.
+doctor_fetch() {
+    local url="$1"
+    if [[ "$HTTP_TOOL" == "curl" ]]; then
+        curl -s --fail --connect-timeout "$DEFAULT_PING_TIMEOUT" --max-time "$DEFAULT_TIMEOUT" --location "$url" 2>/dev/null
+    elif [[ "$HTTP_TOOL" == "wget" ]]; then
+        wget -q -O - --tries=1 --timeout="$DEFAULT_TIMEOUT" "$url" 2>/dev/null
+    fi
+}
+
 cmd_doctor() {
     local send_test_ping=false
+    local skip_version_check=false
     local problems=0
     local warnings=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --ping) send_test_ping=true; shift ;;
+            --no-update-check) skip_version_check=true; shift ;;
             *)
                 log "error" "Unknown option: $1"
-                echo "Usage: $0 doctor [--ping]"
+                echo "Usage: $0 doctor [--ping] [--no-update-check]"
                 return 1
                 ;;
         esac
@@ -1162,6 +1178,8 @@ cmd_doctor() {
     d_ok()   { echo -e "\033[0;32m✓\033[0m $1"; }
     d_warn() { echo -e "\033[0;33m!\033[0m $1"; warnings=$((warnings + 1)); }
     d_fail() { echo -e "\033[0;31m✗\033[0m $1"; problems=$((problems + 1)); }
+    # A check that could not run is neither a pass nor a problem.
+    d_info() { echo -e "\033[2m·\033[0m $1"; }
 
     header
     echo ""
@@ -1264,6 +1282,25 @@ cmd_doctor() {
         fi
     fi
 
+    # "Am I running the current client?" is what doctor is opened for after an
+    # incident. The published version sits next to the download, so answering it
+    # costs one small request instead of re-downloading the whole script.
+    if [[ "$skip_version_check" == "true" ]]; then
+        d_info "Version: $VERSION_TAG (update check skipped)"
+    else
+        local latest=""
+        [[ -n "$HTTP_TOOL" ]] && latest=$(doctor_fetch "$DOWNLOAD_BASE_URL/hellocron.sh.version")
+        latest=$(printf '%s' "$latest" | tr -d '[:space:]')
+
+        if [[ ! "$latest" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?-[0-9]{6}$ ]]; then
+            d_info "Version: $VERSION_TAG (could not check for a newer one at $DOWNLOAD_BASE_URL)"
+        elif [[ "$latest" == "$VERSION_TAG" ]]; then
+            d_ok "Version: $VERSION_TAG (latest)"
+        else
+            d_warn "Version: $VERSION_TAG, latest is $latest - run: $0 update"
+        fi
+    fi
+
     if command -v crontab >/dev/null 2>&1; then
         local cron_count
         cron_count=$(crontab -l 2>/dev/null | grep -cvE '^[[:space:]]*(#|$)' || true)
@@ -1292,8 +1329,8 @@ cmd_doctor() {
 
 cmd_update() {
     local check_only=false
-    local update_url="https://hellocron.com/hellocron.sh"
-    local checksum_url="https://hellocron.com/hellocron.sh.sha256"
+    local update_url="$DOWNLOAD_BASE_URL/hellocron.sh"
+    local checksum_url="$DOWNLOAD_BASE_URL/hellocron.sh.sha256"
     local script_path
     script_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")
 
@@ -1587,7 +1624,7 @@ get_cron_schedule() {
             fi
 
             if [[ "$line" == *"$script_name"* && "$line" == *"$monitor_name"* ]]; then
-                if [[ "$line" =~ ^[[:space:]]*([*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+)[[:space:]]+ ]]; then
+                if [[ "$line" =~ ^[[:space:]]*([*0-9,~/-]+[[:space:]]+[*0-9A-Za-z,~/-]+[[:space:]]+[*0-9A-Za-z,~/-]+[[:space:]]+[*0-9A-Za-z,~/-]+[[:space:]]+[*0-9A-Za-z,~/-]+)[[:space:]]+ ]]; then
                     cron_schedule="${BASH_REMATCH[1]}"
                 elif [[ "$line" =~ ^[[:space:]]*(@[a-z]+)[[:space:]]+ ]]; then
                     cron_schedule="${BASH_REMATCH[1]}"
@@ -1609,7 +1646,7 @@ get_cron_schedule() {
                     fi
 
                     if [[ "$line" == *"$script_name"* && "$line" == *"$monitor_name"* ]]; then
-                        if [[ "$line" =~ ^[[:space:]]*([*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+)[[:space:]]+ ]]; then
+                        if [[ "$line" =~ ^[[:space:]]*([*0-9,~/-]+[[:space:]]+[*0-9A-Za-z,~/-]+[[:space:]]+[*0-9A-Za-z,~/-]+[[:space:]]+[*0-9A-Za-z,~/-]+[[:space:]]+[*0-9A-Za-z,~/-]+)[[:space:]]+ ]]; then
                             cron_schedule="${BASH_REMATCH[1]}"
                         elif [[ "$line" =~ ^[[:space:]]*(@[a-z]+)[[:space:]]+ ]]; then
                             cron_schedule="${BASH_REMATCH[1]}"
@@ -1748,6 +1785,182 @@ sanitize_monitor_name() {
     printf '%s' "${out%%-}"
 }
 
+# Quotes a value only when it needs it, so a plain crontab line stays readable.
+shell_quote() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_.,:/@=-]*) printf '"%s"' "${1//\"/\\\"}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# In a system crontab the first word after the schedule is the user to run as.
+# Sets CRON_USER and CRON_COMMAND, returns non-zero when there is no user field.
+CRON_USER=""
+CRON_COMMAND=""
+split_cron_user() {
+    CRON_USER=""
+    CRON_COMMAND="$1"
+    [[ "$system_crontab" == "true" ]] || return 1
+    # read splits on any run of whitespace: /etc/crontab separates the fields
+    # with tabs as often as with spaces.
+    local first rest
+    read -r first rest <<< "$1"
+    # A username, not a command: no slash, no dot, no assignment, and something after it
+    [[ "$first" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || return 1
+    [[ -n "$rest" ]] || return 1
+    CRON_USER="$first"
+    CRON_COMMAND="$rest"
+    return 0
+}
+
+# Builds the crontab line: schedule, client, run, name, options, then the command.
+# Options have to come before the command, because everything after them is the
+# command to execute; a project name with a space has to stay one argument.
+build_cron_entry() {
+    local schedule="$1" client="$2" name="$3" tags="$4" project="$5" command="$6" run_as="${7:-}"
+    local entry="$schedule"
+    [[ -n "$run_as" ]] && entry="$entry $run_as"
+    entry="$entry $client run $name"
+    [[ -n "$tags" ]] && entry="$entry --tags $(shell_quote "$tags")"
+    [[ -n "$project" ]] && entry="$entry --project $(shell_quote "$project")"
+    printf '%s %s' "$entry" "$command"
+}
+
+# crontab(5) allows names only in two fields: months in the fourth, days of the
+# week in the fifth. Everything else is numeric. Validating per field keeps
+# Quartz-only syntax (14W, LW, 6#5), year fields and plain typos ("5 j", "friday")
+# out of the proposal instead of emitting a line cron would refuse to load.
+valid_cron_endpoint() {
+    local v="${1,,}"
+    [[ "$v" =~ ^[0-9]+$ ]] && return 0
+    case "$2" in
+        month) case "$v" in jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec) return 0 ;; esac ;;
+        dow)   case "$v" in sun|mon|tue|wed|thu|fri|sat) return 0 ;; esac ;;
+    esac
+    return 1
+}
+
+# One field: comma-separated items, each optionally stepped (/n) and given as a
+# value, a range (a-b) or a random value in a range (a~b, cronie).
+valid_cron_field() {
+    local field="$1" kind="${2:-num}"
+    [[ -n "$field" ]] || return 1
+    local -a items=()
+    IFS=',' read -ra items <<< "$field"
+    (( ${#items[@]} )) || return 1
+
+    local item base step sep lo hi
+    for item in "${items[@]}"; do
+        [[ -n "$item" ]] || return 1
+        if [[ "$item" == */* ]]; then
+            step="${item##*/}"
+            base="${item%%/*}"
+            [[ "$step" =~ ^[0-9]+$ ]] || return 1
+        else
+            base="$item"
+        fi
+        [[ "$base" == "*" ]] && continue
+
+        sep=""
+        [[ "$base" == *-* ]] && sep="-"
+        [[ "$base" == *"~"* ]] && sep="~"
+        if [[ -n "$sep" ]]; then
+            lo="${base%%"$sep"*}"
+            hi="${base#*"$sep"}"
+            # A bare "~" is "any value in the whole range", so both ends may be empty.
+            [[ "$sep" == "~" && -z "$lo" && -z "$hi" ]] && continue
+            valid_cron_endpoint "$lo" "$kind" || return 1
+            valid_cron_endpoint "$hi" "$kind" || return 1
+            continue
+        fi
+        valid_cron_endpoint "$base" "$kind" || return 1
+    done
+    return 0
+}
+
+valid_cron_schedule() {
+    valid_cron_field "$1" num   || return 1
+    valid_cron_field "$2" num   || return 1
+    valid_cron_field "$3" num   || return 1
+    valid_cron_field "$4" month || return 1
+    valid_cron_field "$5" dow   || return 1
+    return 0
+}
+
+# Matches a five-field line and validates it in one step. The result comes back in
+# globals because valid_cron_field runs its own regexes, and those overwrite
+# BASH_REMATCH before the caller could read the captures.
+CRON_SCHEDULE=""
+CRON_REST=""
+parse_cron_line() {
+    [[ "$1" =~ ^[[:space:]]*([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(.+) ]] || return 1
+    local f1="${BASH_REMATCH[1]}" f2="${BASH_REMATCH[2]}" f3="${BASH_REMATCH[3]}"
+    local f4="${BASH_REMATCH[4]}" f5="${BASH_REMATCH[5]}" rest="${BASH_REMATCH[6]}"
+    valid_cron_schedule "$f1" "$f2" "$f3" "$f4" "$f5" || return 1
+    # Rebuilt with single spaces: /etc/crontab mixes tabs and spaces.
+    CRON_SCHEDULE="$f1 $f2 $f3 $f4 $f5"
+    CRON_REST="$rest"
+    return 0
+}
+
+# A sixth schedule field (Quartz seconds or years) is not crontab(5) and would
+# otherwise be taken for the start of the command.
+looks_like_extra_schedule_field() {
+    local token="$1"
+    [[ "$token" == *[A-Za-z/]* ]] && return 1
+    valid_cron_field "$token" num
+}
+
+# Splits a trailing "silencer" off the command: the >/dev/null 2>&1 that keeps
+# cron from mailing every run. It belongs outside the wrapper, so the client's
+# own messages are silenced too. Any other redirection stays with the command,
+# because its target holds real output.
+CMD_CORE=""
+CMD_SILENCER=""
+split_silencer() {
+    CMD_CORE="$1"
+    CMD_SILENCER=""
+    local core="$1" token suffix=""
+    while true; do
+        token="${core##*[[:space:]]}"
+        [[ "$token" == "$core" ]] && break
+        case "$token" in
+            2\>\&1|1\>\&2|\&\>/dev/null|\>/dev/null|\>\>/dev/null|1\>/dev/null|2\>/dev/null|\>\&/dev/null) ;;
+            *) break ;;
+        esac
+        suffix="$token${suffix:+ }$suffix"
+        core="${core%[[:space:]]*}"
+        core="${core%"${core##*[![:space:]]}"}"
+    done
+    [[ -n "$suffix" ]] || return 1
+    CMD_CORE="$core"
+    CMD_SILENCER="$suffix"
+    return 0
+}
+
+# "hellocron run" executes its arguments directly, it is not a shell. A command
+# built out of shell syntax (&&, ||, ;, a pipe, a redirection, a subshell, an if)
+# would only be monitored up to the first operator: the rest would run outside the
+# monitor and its failure would never be reported. Those commands go through sh -c.
+command_needs_shell() {
+    local cmd="$1"
+    case "$cmd" in
+        *'&&'*|*'||'*|*';'*|*'|'*|*'>'*|*'<'*|*'`'*|*'$('*|*'{'*|*'&'*) return 0 ;;
+    esac
+    local first
+    read -r first _ <<< "$cmd"
+    case "${first//[\'\"]/}" in
+        if|for|while|until|case|test|\[|\[\[|cd|echo|printf|export|source|.|eval|exec|command|read|umask|ulimit) return 0 ;;
+    esac
+    return 1
+}
+
+# Single quotes are the only quoting that needs no further escaping inside cron,
+# and an embedded quote is closed, escaped and reopened the usual way.
+shell_wrap_command() {
+    printf "/bin/sh -c '%s'" "${1//\'/\'\\\'\'}"
+}
+
 # Turns a cron command into a name a human recognises in the dashboard.
 # A URL first, because that is what most cron one-liners are, then the first
 # real program on the line, with its target appended when the program name
@@ -1799,42 +2012,74 @@ derive_monitor_name() {
         # A bare hostname is ambiguous when several jobs hit the same site.
         [[ -z "$parts" && "$host" != "$site" ]] && name="${site}-${host%%.*}"
     else
-        local -a words=()
-        local w base prog="" target=""
-        read -ra words <<< "$cmd"
-        for w in "${words[@]}"; do
-            # environment assignments and flags are never the program
-            [[ "$w" == -* ]] && continue
-            [[ "$w" == *=* && "$w" != /* && "$w" != ./* ]] && continue
-            base=${w##*/}
-            base=${base%.sh}; base=${base%.bash}; base=${base%.php}
-            base=${base%.py}; base=${base%.pl}; base=${base%.rb}; base=${base%.js}
-            case "$base" in
-                sudo|doas|env|nice|ionice|flock|timeout|chronic|setsid|nohup|xargs|time|bash|sh|dash|zsh|ksh|php|php[0-9]*|python|python[0-9]*|perl|ruby|node|npm|npx|docker|docker-compose|podman|kubectl|make)
-                    continue ;;
-            esac
-            if [[ -z "$prog" ]]; then
-                prog="$base"
-                # These say nothing on their own, so keep looking for a target.
-                case "$prog" in
-                    find|rm|cp|mv|tar|rsync|gzip|zip|unzip|mysqldump|pg_dump|psql|mysql|git|composer|artisan|wp|drush|systemctl|service|bin)
-                        continue ;;
-                esac
-                break
-            fi
-            # A short opaque token is a bundled flag (tar czf), not a target.
-            if [[ "$w" != */* && "$w" != *.* && "$w" != *:* && ${#w} -le 4 ]]; then
-                continue
-            fi
-            target=${w##*/}
-            target=${target%.php}
-            break
-        done
-        name="$prog"
-        [[ -n "$target" ]] && name="${prog}-${target}"
+        # A cron command is rarely one program. "test -x X || { cd / && run-parts Y; }"
+        # names the job after run-parts, not after test or cd, so the command is cut
+        # into segments at the shell operators and the first segment that actually
+        # runs something wins. Redirections carry no name and are dropped first.
+        local bare
+        bare=$(printf '%s' "$cmd" \
+            | sed -E 's/[0-9]*>>?[[:space:]]*&?[0-9]*[^[:space:]]*//g; s/<[[:space:]]*[^[:space:]]+//g' \
+            | sed -E 's/(\&\&|\|\||[;|])/\n/g')
+
+        local segment
+        while IFS= read -r segment; do
+            name=$(derive_name_from_words "$segment")
+            [[ -n "$name" ]] && break
+        done <<< "$bare"
     fi
 
     sanitize_monitor_name "$name"
+}
+
+# Scans one simple command for the program that gives the job its name. Prints
+# nothing when the segment only contains shell plumbing, so the caller can move on
+# to the next segment.
+derive_name_from_words() {
+    local -a words=()
+    local w base prog="" target=""
+    read -ra words <<< "$1"
+
+    # A condition or a setup step names nothing: the job is what runs after it.
+    case "${words[0]:-}" in
+        if|while|until|case|test|'['|'[['|command|'!'|cd|source|.) return 0 ;;
+    esac
+
+    for w in "${words[@]}"; do
+        # environment assignments, flags and shell punctuation are never the program
+        [[ "$w" == -* ]] && continue
+        [[ "$w" == *=* && "$w" != /* && "$w" != ./* ]] && continue
+        w="${w//[\'\"]/}"
+        [[ -z "$w" ]] && continue
+        base=${w##*/}
+        base=${base%.sh}; base=${base%.bash}; base=${base%.php}
+        base=${base%.py}; base=${base%.pl}; base=${base%.rb}; base=${base%.js}
+        case "$base" in
+            '{'|'}'|'('|')'|then|else|elif|fi|do|done|esac|cd|echo|printf|export|source|.|eval|exec|set|unset|local|read|umask|ulimit|exit|return)
+                continue ;;
+            sudo|doas|env|nice|ionice|flock|timeout|chronic|setsid|nohup|xargs|time|bash|sh|dash|zsh|ksh|php|php[0-9]*|python|python[0-9]*|perl|ruby|node|npm|npx|docker|docker-compose|podman|kubectl|make)
+                continue ;;
+        esac
+        if [[ -z "$prog" ]]; then
+            prog="$base"
+            # These say nothing on their own, so keep looking for a target.
+            case "$prog" in
+                find|rm|cp|mv|tar|rsync|gzip|zip|unzip|touch|chown|chmod|mysqldump|pg_dump|psql|mysql|git|composer|artisan|console|wp|drush|systemctl|service|run-parts|bin)
+                    continue ;;
+            esac
+            break
+        fi
+        # A short opaque token is a bundled flag (tar czf), not a target.
+        if [[ "$w" != */* && "$w" != *.* && "$w" != *:* && ${#w} -le 4 ]]; then
+            continue
+        fi
+        target=${w##*/}
+        target=${target%.php}
+        break
+    done
+
+    [[ -z "$prog" ]] && return 0
+    [[ -n "$target" ]] && prog="${prog}-${target}"
+    printf '%s' "$prog"
 }
 
 cmd_discover() {
@@ -1844,9 +2089,12 @@ cmd_discover() {
     local verbose=false
     local use_name_hash=false
     local host_prefix=false
+    # /etc/crontab and /etc/cron.d/* put a username between the schedule and the
+    # command. Treated as part of the command it becomes the monitor name and
+    # breaks the wrapped line, so those files are parsed differently.
+    local system_crontab=""
     local default_project="$DEFAULT_PROJECT"
     local script_absolute_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")
-    local template="%s %s run %s %s"
     local discovered=0
 
     while [[ $# -gt 0 ]]; do
@@ -1865,6 +2113,14 @@ cmd_discover() {
                 ;;
             --verbose|-v)
                 verbose=true
+                shift
+                ;;
+            --system)
+                system_crontab=true
+                shift
+                ;;
+            --user-crontab)
+                system_crontab=false
                 shift
                 ;;
             --host-prefix)
@@ -1889,6 +2145,8 @@ cmd_discover() {
                 echo "  --verbose, -v             Show detailed information"
                 echo "  --use-name-hash           Use a hash as the monitor name"
                 echo "  --host-prefix             Prefix every name with this host, for the same crontab on many servers"
+                echo "  --system                  Treat the sixth field as a user (auto-detected for /etc/crontab and /etc/cron.d)"
+                echo "  --user-crontab            Opposite of --system, when auto-detection guesses wrong"
                 echo "  --project <name>          Default project name for discovered jobs"
                 echo "  --help, -h                Show this help"
                 echo ""
@@ -1913,6 +2171,13 @@ cmd_discover() {
 
     local temp_file=$(mktemp)
 
+    if [[ -z "$system_crontab" ]]; then
+        case "$crontab_file" in
+            /etc/crontab|/etc/cron.d/*) system_crontab=true ;;
+            *) system_crontab=false ;;
+        esac
+    fi
+
     if [[ -z "$crontab_file" ]]; then
         if ! crontab -l &>/dev/null; then
             log "error" "Cannot access user crontab. Check whether you have any cron jobs."
@@ -1931,10 +2196,12 @@ cmd_discover() {
         local content=$(cat "$crontab_file")
     fi
 
-    # Names have to be unique inside one crontab. The short hash is only
-    # appended when two lines derive the same name, so the common case stays
-    # readable: fakturex-fcron, not curl-16f0fd.
+    # Names have to be unique inside one crontab, but the same job split across
+    # two schedule lines (a maintenance window, say) is one monitor and has to
+    # keep one name. So the hash is appended only when two *different* commands
+    # derive the same name; an identical command reuses the name it already got.
     declare -A seen_names=()
+    declare -A name_for_cmd=()
     local MONITOR_NAME=""
     # Sets MONITOR_NAME instead of echoing it: command substitution runs in a
     # subshell, and the bookkeeping above has to survive from line to line.
@@ -1947,8 +2214,15 @@ cmd_discover() {
             return 0
         fi
 
+        if [[ -n "${name_for_cmd[$cmd]:-}" ]]; then
+            MONITOR_NAME="${name_for_cmd[$cmd]}"
+            return 0
+        fi
+
         name=$(derive_monitor_name "$cmd")
-        [[ -z "$name" ]] && name="job"
+        # Nothing recognisable in the command (a non-ASCII path, pure shell): the
+        # hash at least keeps two such jobs apart.
+        [[ -z "$name" ]] && name="job-$(printf '%s' "$cmd" | md5sum | cut -c1-6)"
 
         # One crontab deployed to several servers needs one monitor per server;
         # the host is otherwise only visible on the individual events.
@@ -1964,6 +2238,7 @@ cmd_discover() {
             name="${name}-$(printf '%s' "$cmd" | md5sum | cut -c1-6)"
         fi
         seen_names[$name]=1
+        name_for_cmd[$cmd]="$name"
 
         MONITOR_NAME="$name"
     }
@@ -1987,9 +2262,19 @@ cmd_discover() {
             log "debug" "Analyzing line: $line"
         fi
 
-        if [[ "$line" =~ ^[[:space:]]*([*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+[[:space:]]+[*0-9,-/]+)[[:space:]]+(.+) ]]; then
-            local schedule="${BASH_REMATCH[1]}"
-            local command="${BASH_REMATCH[2]}"
+        if parse_cron_line "$line"; then
+            local schedule="$CRON_SCHEDULE"
+            local command="$CRON_REST"
+            local run_as=""
+
+            if [[ "$system_crontab" != "true" ]]; then
+                local first_word="${command%%[[:space:]]*}"
+                if looks_like_extra_schedule_field "$first_word"; then
+                    log "info" "Skipped line: six schedule fields, which crontab(5) does not define"
+                    continue
+                fi
+            fi
+            split_cron_user "$command" && { run_as="$CRON_USER"; command="$CRON_COMMAND"; }
 
             command=$(echo "$command" | sed 's/[[:space:]]*#.*$//')
 
@@ -2020,20 +2305,15 @@ cmd_discover() {
                 suggested_tags="update"
             fi
 
-            local entry=""
-            if [[ -n "$suggested_tags" ]]; then
-                if [[ -n "$default_project" ]]; then
-                    entry=$(printf "$template --tags %s --project %s" "$schedule" "$script_absolute_path" "$monitor_name" "$suggested_tags" "$default_project" "$command")
-                else
-                    entry=$(printf "$template --tags %s" "$schedule" "$script_absolute_path" "$monitor_name" "$suggested_tags" "$command")
-                fi
-            else
-                if [[ -n "$default_project" ]]; then
-                    entry=$(printf "$template --project %s" "$schedule" "$script_absolute_path" "$monitor_name" "$default_project" "$command")
-                else
-                    entry=$(printf "$template" "$schedule" "$script_absolute_path" "$monitor_name" "$command")
-                fi
+            local run_command="$command" silencer=""
+            split_silencer "$run_command" && { run_command="$CMD_CORE"; silencer="$CMD_SILENCER"; }
+            if command_needs_shell "$run_command"; then
+                run_command=$(shell_wrap_command "$run_command")
             fi
+            [[ -n "$silencer" ]] && run_command="$run_command $silencer"
+
+            local entry
+            entry=$(build_cron_entry "$schedule" "$script_absolute_path" "$monitor_name" "$suggested_tags" "$default_project" "$run_command" "$run_as")
 
             if check_cron_entry_exists "$entry"; then
                 echo -e "\033[1;37m$entry\033[0m" >> "$temp_file"
@@ -2044,9 +2324,11 @@ cmd_discover() {
             fi
             ((discovered++))
 
-        elif [[ "$line" =~ ^[[:space:]]*@(reboot|yearly|annually|monthly|weekly|daily|hourly)[[:space:]]+(.+) ]]; then
+        elif [[ "$line" =~ ^[[:space:]]*@(reboot|yearly|annually|monthly|weekly|daily|midnight|hourly)[[:space:]]+(.+) ]]; then
             local schedule="@${BASH_REMATCH[1]}"
             local command="${BASH_REMATCH[2]}"
+            local run_as=""
+            split_cron_user "$command" && { run_as="$CRON_USER"; command="$CRON_COMMAND"; }
 
             command=$(echo "$command" | sed 's/[[:space:]]*#.*$//')
 
@@ -2077,18 +2359,22 @@ cmd_discover() {
                 suggested_tags="update"
             fi
 
+            local nickname="${schedule#@}"
             if [[ -n "$suggested_tags" ]]; then
-                suggested_tags="${suggested_tags},${BASH_REMATCH[1]}"
+                suggested_tags="${suggested_tags},${nickname}"
             else
-                suggested_tags="${BASH_REMATCH[1]}"
+                suggested_tags="${nickname}"
             fi
 
-            local entry=""
-            if [[ -n "$default_project" ]]; then
-                entry=$(printf "$template --tags %s --project %s" "$schedule" "$script_absolute_path" "$monitor_name" "$suggested_tags" "$default_project" "$command")
-            else
-                entry=$(printf "$template --tags %s" "$schedule" "$script_absolute_path" "$monitor_name" "$suggested_tags" "$command")
+            local run_command="$command" silencer=""
+            split_silencer "$run_command" && { run_command="$CMD_CORE"; silencer="$CMD_SILENCER"; }
+            if command_needs_shell "$run_command"; then
+                run_command=$(shell_wrap_command "$run_command")
             fi
+            [[ -n "$silencer" ]] && run_command="$run_command $silencer"
+
+            local entry
+            entry=$(build_cron_entry "$schedule" "$script_absolute_path" "$monitor_name" "$suggested_tags" "$default_project" "$run_command" "$run_as")
 
             if check_cron_entry_exists "$entry"; then
                 echo -e "\033[1;37m$entry\033[0m" >> "$temp_file"

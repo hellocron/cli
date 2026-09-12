@@ -2,7 +2,18 @@
 
 Canonical source: [docs.hellocron.com/reference/client-changelog](https://docs.hellocron.com/reference/client-changelog/)
 
-## v1.5-260912 (current)
+## v1.5.2-260912 (current)
+
+Released 2026-09-12. `discover` understands the crontabs that actually exist, and `doctor` answers whether the client is current.
+
+- `doctor` reports whether the installed client is the current one. It asks for the published version, names it when a newer one exists and tells you to run `update`; a pending update is a warning, not a failed health check. When the download host cannot be reached the line says so instead of claiming either answer. `--no-update-check` skips the request.
+- Day and month names are accepted: `5 4 * * sun`, `0 8 * * MON` and `30 2 1 JAN *` are ordinary crontab(5) syntax and were being skipped without a word, so the jobs they scheduled were left unmonitored.
+- A command built out of shell syntax (`&&`, `||`, `;`, a pipe, a redirection, an `if`) is handed to `/bin/sh -c` instead of being executed directly. `run` is not a shell: `test -x /usr/sbin/anacron || { cd / && run-parts /etc/cron.daily; }` used to be monitored up to the first operator only, and the part that did the work ran outside the monitor. A trailing `>/dev/null 2>&1` stays outside, so the client's own output is silenced too.
+- System crontabs are handled: in `/etc/crontab` and `/etc/cron.d/*` the sixth field is the user to run as, detected from the file name or forced with `--system` / `--user-crontab`. The user stays where cron expects it and no longer becomes the monitor name, so a whole directory of jobs no longer arrives as `root`, `root-5ef365`, `root-913b85`.
+- Monitor names come from the program that does the work, not from the shell plumbing around it: `run-parts-cron-daily`, `debian-sa1`, `sessionclean` instead of `test`, `command`, `cd`, `if`. Tabs between the schedule fields are handled, and `@midnight` is recognised along with the other nicknames.
+- Expressions cron would refuse to load are skipped instead of being proposed: Quartz extensions (`0 0 14W * *`, `0 0 * * 6#5`, `LW`), a sixth schedule field, full day names (`friday`), plain typos. A rejected crontab file takes every other job down with it, so a missing proposal is the safer answer.
+
+## v1.5.1-260912
 
 Released 2026-09-12. One question at setup, names you can read in the dashboard.
 
